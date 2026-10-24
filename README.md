@@ -1487,3 +1487,297 @@ GPT‑4V / DeepSeek‑Vision：可以基于图像做连续推理、多轮对话
 
 
 
+图像Embedding与CLIP
+一、图像Embedding
+1. 定义：把图片转换成固定长度的稠密向量，和文本Embedding逻辑一致，向量空间里相似图片距离更近。
+2. 用途：图文检索、多模态RAG、以图搜图、图像聚类、和文本向量做跨模态匹配。
+3. 和文本Embedding区别
+- 文本Embedding：输入token序列 → 文本向量
+- 图像Embedding：输入图片（经过resize、归一化）→ 图像向量
+4. 痛点：单独图像向量和文本向量不在同一个向量空间，不能直接对比相似度，这就是CLIP要解决的问题。
+5. 输入预处理：缩放、中心裁剪、归一化、转tensor；不同模型预处理规则不一样，错了效果暴跌。
+二、CLIP（Contrastive Language-Image Pre-training）
+1. 核心思想
+ 
+对比学习，对齐图像和文本的向量空间，让匹配的图文对向量靠近、不匹配的互相远离。
+ 
+一句话：一张图 + 对应的描述文本，训练到图像Encoder、文本Encoder输出的Embedding可以直接算相似度。
+ 
+2. 模型结构（两个独立编码器）
+ 
+- Image Encoder：ResNet / ViT（Vision Transformer），输出图像embedding
+- Text Encoder：Transformer文本编码器，输出文本embedding
+- 两个encoder输出向量维度相同，可直接计算余弦相似度
+ 
+3. 训练方式：对比学习
+ 
+- 一个batch里，N张图、N条对应文本，构成N个正样本对，其余都是负样本。
+- 损失：InfoNCE损失，最大化正样本图文相似度，降低负样本相似度。
+- 特点：不需要标注分类标签，只用大量互联网图文对做预训练。
+ 
+4. 核心能力
+ 
+✅ 零样本图文检索：输入文字搜图 / 输入图片搜文字描述
+✅ 零样本图像分类：不用微调，给类别写prompt（ a photo of a cat ），算相似度选最高
+✅ 生成图文Embedding，用于多模态RAG
+❌ 不做图像生成、不是VLM（和GPT-4V、DeepSeek-Vision区分开：CLIP侧重匹配，VLM侧重看图问答）
+ 
+5. 重要概念：Prompt Template
+ 
+CLIP对提示词敏感，不是随便写。
+示例模板： a photo of a {class_name} ，很多任务会用多个prompt投票（prompt ensemble）提升稳定性。
+ 
+6. 工程要点&坑
+ 
+1. 向量归一化：CLIP输出embedding一般L2归一化，再算余弦相似度。
+2. 分辨率：ViT版CLIP默认224×224；新版本如CLIP-ViT-L更大分辨率。
+3. 不擅长：细粒度区分、OCR、复杂推理；适合粗粒度图文匹配。
+4. 变体：OpenCLIP（开源复现，更多底座、更好效果，项目开发优先选）
+5. 多模态RAG用法：
+图片 → CLIP图像embedding入库；查询文本 → CLIP文本embedding，向量库召回相似图片。
+ 
+三、CLIP vs 普通图像Embedding模型
+ 
+- 普通图像Encoder：只在图像空间，文本不能检索图片
+- CLIP：跨模态对齐，文本向量、图像向量可互相检索
+ 
+四、极简代码思路（OpenCLIP）
+ 
+python
+  
+import open_clip
+model, preprocess, tokenizer = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion5b_s13b_b90k')
+# 图向量化
+image = preprocess(img).unsqueeze(0)
+img_emb = model.encode_image(image)
+# 文本向量化
+text = tokenizer(["a dog"])
+txt_emb = model.encode_text(text)
+# 余弦相似度
+ 
+ 
+五、适用&不适用场景
+ 
+✅ 适合：图文检索、多模态RAG、以图搜图、零样本粗分类
+❌ 不适合：图片复杂推理、图表OCR识别、细粒度高精度分类（需要微调或者VLM）
+ 
+六、和VLM（GPT4V/DeepSeek-Vision）区分
+ 
+- CLIP：匹配模型，输出向量，不会自然语言回答
+- VLM：多模态大模型，输入图+prompt，直接输出文字答案，也可以输出embedding，但主要用来问答
+  
+
+ 语音识别
+一、基础概念
+- ASR：自动语音识别，把音频转文字；Whisper 是 OpenAI 开源的端到端语音识别模型
+- 核心特点：多语言、自带标点、支持带时间戳、可识别英文/中文等几十种语言、支持翻译（语音→英文文本）
+- 本质：Transformer 编码器-解码器结构，音频先转梅尔频谱图作为模型输入
+ 
+二、模型规格（从小到大，速度↓精度↑显存↑）
+ 
+tiny → base → small → medium → large（large-v2 / large-v3，项目最常用）
+ 
+- tiny/base：本地轻量、适合低延迟，中文容易错
+- large-v3：综合最强，中文、口音、嘈杂音频效果更好，消耗资源高
+ 
+三、输入预处理（重点坑点）
+ 
+1. 统一采样率：16000 Hz（强制），其他采样率必须重采样
+2. 音频格式：支持 wav、mp3、flac；内部统一转单声道
+3. 梅尔频谱：固定窗口切片，把时域音频转为频谱特征，作为Transformer输入
+ 
+不是直接喂波形，频谱才是模型看懂的“音频图像”
+ 
+四、三大核心能力
+ 
+1. 语音转写（transcribe）：音频 → 对应语言文本
+2. 语音翻译（translate）：任意语言音频 → 英文文本
+3. 分段+时间戳：输出每个文本片段的 start/end 时间，用于字幕、音频对齐
+ 
+五、关键参数（工程高频）
+ 
+-  language ：指定语言  language="zh" ，不指定会自动检测（自动检测耗资源、偶尔识别错语种）
+-  task ： transcribe （转写，默认） /  translate （翻译）
+-  temperature ：随机性，0 代表贪心解码，稳定、适合生产
+-  word_timestamps=True ：开启单词级时间戳（默认只有句子级）
+-  vad_filter ：语音活动检测，过滤静音段，减少幻觉（新版whisper支持）
+ 
+六、运行方式
+ 
+1. 原生 OpenAI/whisper 库（本地跑模型）
+2. faster-whisper：生产首选！ 基于CTranslate2量化加速，速度提升2~4倍、显存更低，效果几乎无损
+3. API调用：OpenAI Audio API，不用本地部署，适合不想维护模型的服务
+ 
+七、常见问题 & 幻觉（高频踩坑）
+ 
+- 幻觉（hallucination）：静音、噪声段凭空输出文字；解决：开启VAD、设置no_speech阈值、后处理过滤无意义文本
+- 长音频：Whisper原生会自动切分；超长音频建议手动切片，避免上下文漂移
+- 口音、低音质、背景噪音：优先 large-v3，配合降噪前置处理
+- 混响、小声音频：ASR效果明显下降，前置降噪比调模型参数更有用
+ 
+八、典型业务场景
+ 
+✅ 字幕生成、会议录音转写、语音对话转文本、语音RAG（语音→文字→检索）
+❌ 不适合：极嘈杂工业噪音、多人同时重叠说话（需要说话人分离+ASR组合，即diarization）
+ 
+九、配套概念区分
+ 
+- Whisper（ASR）：音频→文本，识别内容
+- 说话人分离（pyannote.audio）：区分“哪一段是谁说的”，配合Whisper实现【谁+说了什么】
+- TTS：文本→语音，和Whisper反向
+ 
+十、极简示例（faster-whisper，生产推荐）
+ 
+python
+  
+from faster_whisper import WhisperModel
+model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+segments, info = model.transcribe("audio.mp3", language="zh", word_timestamps=True)
+for seg in segments:
+    print(seg.start, seg.end, seg.text)
+
+
+
+ 语音合成
+一、基础概念
+ 
+- ASR：自动语音识别，把音频转文字；Whisper 是 OpenAI 开源的端到端语音识别模型
+- 核心特点：多语言、自带标点、支持带时间戳、可识别英文/中文等几十种语言、支持翻译（语音→英文文本）
+- 本质：Transformer 编码器-解码器结构，音频先转梅尔频谱图作为模型输入
+ 
+二、模型规格（从小到大，速度↓精度↑显存↑）
+ 
+tiny → base → small → medium → large（large-v2 / large-v3，项目最常用）
+ 
+- tiny/base：本地轻量、适合低延迟，中文容易错
+- large-v3：综合最强，中文、口音、嘈杂音频效果更好，消耗资源高
+ 
+三、输入预处理（重点坑点）
+ 
+1. 统一采样率：16000 Hz（强制），其他采样率必须重采样
+2. 音频格式：支持 wav、mp3、flac；内部统一转单声道
+3. 梅尔频谱：固定窗口切片，把时域音频转为频谱特征，作为Transformer输入
+ 
+不是直接喂波形，频谱才是模型看懂的“音频图像”
+ 
+四、三大核心能力
+ 
+1. 语音转写（transcribe）：音频 → 对应语言文本
+2. 语音翻译（translate）：任意语言音频 → 英文文本
+3. 分段+时间戳：输出每个文本片段的 start/end 时间，用于字幕、音频对齐
+ 
+五、关键参数（工程高频）
+ 
+-  language ：指定语言  language="zh" ，不指定会自动检测（自动检测耗资源、偶尔识别错语种）
+-  task ： transcribe （转写，默认） /  translate （翻译）
+-  temperature ：随机性，0 代表贪心解码，稳定、适合生产
+-  word_timestamps=True ：开启单词级时间戳（默认只有句子级）
+-  vad_filter ：语音活动检测，过滤静音段，减少幻觉（新版whisper支持）
+ 
+六、运行方式
+ 
+1. 原生 OpenAI/whisper 库（本地跑模型）
+2. faster-whisper：生产首选！ 基于CTranslate2量化加速，速度提升2~4倍、显存更低，效果几乎无损
+3. API调用：OpenAI Audio API，不用本地部署，适合不想维护模型的服务
+ 
+七、常见问题 & 幻觉（高频踩坑）
+ 
+- 幻觉（hallucination）：静音、噪声段凭空输出文字；解决：开启VAD、设置no_speech阈值、后处理过滤无意义文本
+- 长音频：Whisper原生会自动切分；超长音频建议手动切片，避免上下文漂移
+- 口音、低音质、背景噪音：优先 large-v3，配合降噪前置处理
+- 混响、小声音频：ASR效果明显下降，前置降噪比调模型参数更有用
+ 
+八、典型业务场景
+ 
+✅ 字幕生成、会议录音转写、语音对话转文本、语音RAG（语音→文字→检索）
+❌ 不适合：极嘈杂工业噪音、多人同时重叠说话（需要说话人分离+ASR组合，即diarization）
+ 
+九、配套概念区分
+ 
+- Whisper（ASR）：音频→文本，识别内容
+- 说话人分离（pyannote.audio）：区分“哪一段是谁说的”，配合Whisper实现【谁+说了什么】
+- TTS：文本→语音，和Whisper反向
+ 
+十、极简示例（faster-whisper，生产推荐）
+ 
+python
+  
+from faster_whisper import WhisperModel
+model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+segments, info = model.transcribe("audio.mp3", language="zh", word_timestamps=True)
+for seg in segments:
+    print(seg.start, seg.end, seg.text)
+ 
+
+
+ 多模态RAG
+一、基础概念
+ 
+- ASR：自动语音识别，把音频转文字；Whisper 是 OpenAI 开源的端到端语音识别模型
+- 核心特点：多语言、自带标点、支持带时间戳、可识别英文/中文等几十种语言、支持翻译（语音→英文文本）
+- 本质：Transformer 编码器-解码器结构，音频先转梅尔频谱图作为模型输入
+ 
+二、模型规格（从小到大，速度↓精度↑显存↑）
+ 
+tiny → base → small → medium → large（large-v2 / large-v3，项目最常用）
+ 
+- tiny/base：本地轻量、适合低延迟，中文容易错
+- large-v3：综合最强，中文、口音、嘈杂音频效果更好，消耗资源高
+ 
+三、输入预处理（重点坑点）
+ 
+1. 统一采样率：16000 Hz（强制），其他采样率必须重采样
+2. 音频格式：支持 wav、mp3、flac；内部统一转单声道
+3. 梅尔频谱：固定窗口切片，把时域音频转为频谱特征，作为Transformer输入
+ 
+不是直接喂波形，频谱才是模型看懂的“音频图像”
+ 
+四、三大核心能力
+ 
+1. 语音转写（transcribe）：音频 → 对应语言文本
+2. 语音翻译（translate）：任意语言音频 → 英文文本
+3. 分段+时间戳：输出每个文本片段的 start/end 时间，用于字幕、音频对齐
+ 
+五、关键参数（工程高频）
+ 
+-  language ：指定语言  language="zh" ，不指定会自动检测（自动检测耗资源、偶尔识别错语种）
+-  task ： transcribe （转写，默认） /  translate （翻译）
+-  temperature ：随机性，0 代表贪心解码，稳定、适合生产
+-  word_timestamps=True ：开启单词级时间戳（默认只有句子级）
+-  vad_filter ：语音活动检测，过滤静音段，减少幻觉（新版whisper支持）
+ 
+六、运行方式
+ 
+1. 原生 OpenAI/whisper 库（本地跑模型）
+2. faster-whisper：生产首选！ 基于CTranslate2量化加速，速度提升2~4倍、显存更低，效果几乎无损
+3. API调用：OpenAI Audio API，不用本地部署，适合不想维护模型的服务
+ 
+七、常见问题 & 幻觉（高频踩坑）
+ 
+- 幻觉（hallucination）：静音、噪声段凭空输出文字；解决：开启VAD、设置no_speech阈值、后处理过滤无意义文本
+- 长音频：Whisper原生会自动切分；超长音频建议手动切片，避免上下文漂移
+- 口音、低音质、背景噪音：优先 large-v3，配合降噪前置处理
+- 混响、小声音频：ASR效果明显下降，前置降噪比调模型参数更有用
+ 
+八、典型业务场景
+ 
+✅ 字幕生成、会议录音转写、语音对话转文本、语音RAG（语音→文字→检索）
+❌ 不适合：极嘈杂工业噪音、多人同时重叠说话（需要说话人分离+ASR组合，即diarization）
+ 
+九、配套概念区分
+ 
+- Whisper（ASR）：音频→文本，识别内容
+- 说话人分离（pyannote.audio）：区分“哪一段是谁说的”，配合Whisper实现【谁+说了什么】
+- TTS：文本→语音，和Whisper反向
+ 
+十、极简示例（faster-whisper，生产推荐）
+ 
+python
+  
+from faster_whisper import WhisperModel
+model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+segments, info = model.transcribe("audio.mp3", language="zh", word_timestamps=True)
+for seg in segments:
+    print(seg.start, seg.end, seg.text)
+ 
+ 
